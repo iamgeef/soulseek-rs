@@ -281,8 +281,10 @@ fn an_actual_short_transfer_resumes_opaque_bytes() {
     let content = binary_payload(3 * 64 * 1024 + 257);
     let filename = "opaque.bin";
     let interrupt_at = 64 * 1024 + 1;
-    let part_path = destination.path().join(format!("{filename}.part"));
-    let final_path = destination.path().join(filename);
+    // A bare remote filename lands under <download dir>/<peer username>.
+    let saved_in = destination.path().join("resume_binary_peer");
+    let part_path = saved_in.join(format!("{filename}.part"));
+    let final_path = saved_in.join(filename);
 
     assert!(content.contains(&0));
     assert!(content.contains(&u8::MAX));
@@ -349,7 +351,8 @@ fn a_live_download_pauses_and_resumes_on_the_same_connection() {
     let destination = ScratchDir::new("pause-resume");
     let filename = "paused.bin";
     let content = binary_payload(5 * 64 * 1024 + 257);
-    let part_path = destination.path().join(format!("{filename}.part"));
+    let saved_in = destination.path().join("resume_pause_peer");
+    let part_path = saved_in.join(format!("{filename}.part"));
 
     let (statuses, mut peer, offset) = start_download(
         &subject,
@@ -405,8 +408,5 @@ fn a_live_download_pauses_and_resumes_on_the_same_connection() {
     let _ = wait_for_status(&statuses, "Completed", |status| {
         matches!(status, DownloadStatus::Completed)
     });
-    assert_eq!(
-        fs::read(destination.path().join(filename)).unwrap(),
-        content
-    );
+    assert_eq!(fs::read(saved_in.join(filename)).unwrap(), content);
 }

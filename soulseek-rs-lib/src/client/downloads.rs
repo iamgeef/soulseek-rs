@@ -4,6 +4,7 @@ use super::{
     next_download_token,
 };
 use crate::peer::part_path_of;
+use crate::utils::path::download_directory_for;
 
 impl Client {
     #[must_use]
@@ -120,6 +121,8 @@ impl Client {
         info!("[client] Downloading {} from {}", filename, username);
 
         let token = next_download_token();
+        let download_directory =
+            download_directory_for(&download_directory, &username, &filename);
 
         let (download_sender, download_receiver): (
             Sender<DownloadStatus>,

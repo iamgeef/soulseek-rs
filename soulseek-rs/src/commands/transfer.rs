@@ -8,7 +8,7 @@ use crate::cli::{
 use crate::output::{
     CliError, CliResult, DownloadRecord, Exit, Out, SearchRecord,
 };
-use soulseek_rs::utils::path::expand_tilde;
+use soulseek_rs::utils::path::{download_directory_for, expand_tilde};
 use soulseek_rs::{DownloadStatus, SearchResult};
 use std::collections::{HashMap, VecDeque};
 use std::io::BufRead;
@@ -143,12 +143,17 @@ pub fn rank(items: &mut [SearchRecord], sort: SortKey) {
 /// Where a remote file lands locally — the same rule the library applies, so
 /// the path we report is the path that gets written.
 #[must_use]
-pub fn local_path(download_dir: &str, remote_path: &str) -> PathBuf {
+pub fn local_path(
+    download_dir: &str,
+    user: &str,
+    remote_path: &str,
+) -> PathBuf {
     let name = remote_path
         .split(['/', '\\'])
         .next_back()
         .unwrap_or(remote_path);
-    expand_tilde(download_dir).join(name)
+    expand_tilde(&download_directory_for(download_dir, user, remote_path))
+        .join(name)
 }
 
 /// One file to fetch.
@@ -322,19 +327,23 @@ fn collect(
 ///
 /// Two collisions are possible and both lose data silently: the library keys
 /// downloads by a hash of the remote path, so the same path from two peers
-/// shadows itself, and two different paths sharing a basename would be written
-/// to the same local file. Keep the first (best-ranked) of each and say what
-/// was dropped rather than transferring less than asked.
+/// shadows itself even though each now lands under its own user's folder, and
+/// two requests resolving to the same local file would overwrite each other.
+/// Keep the first (best-ranked) of each and say what was dropped rather than
+/// transferring less than asked.
 fn dedupe(
     requests: impl IntoIterator<Item = Request>,
     download_dir: &str,
     out: &Out,
 ) -> Vec<Request> {
     let mut targets: HashMap<PathBuf, Request> = HashMap::new();
+    let mut paths: HashMap<String, Request> = HashMap::new();
     let mut kept = Vec::new();
     for request in requests {
-        let target = local_path(download_dir, &request.path);
-        if let Some(queued) = targets.get(&target) {
+        let target = local_path(download_dir, &request.user, &request.path);
+        if let Some(queued) =
+            paths.get(&request.path).or_else(|| targets.get(&target))
+        {
             let collision = if queued.path == request.path {
                 format!("same remote path already queued from {}", queued.user)
             } else {
@@ -350,6 +359,7 @@ fn dedupe(
             continue;
         }
         targets.insert(target, request.clone());
+        paths.insert(request.path.clone(), request.clone());
         kept.push(request);
     }
     kept
@@ -539,7 +549,8 @@ fn download_one(
         }
         match updates.recv_timeout(remaining.min(Duration::from_millis(250))) {
             Ok(DownloadStatus::Completed) => {
-                let file = local_path(download_dir, &request.path);
+                let file =
+                    local_path(download_dir, &request.user, &request.path);
                 return Ok(DownloadRecord {
                     user: request.user.clone(),
                     path: request.path.clone(),
@@ -932,18 +943,18 @@ mod tests {
     }
 
     #[test]
-    fn local_path_uses_the_last_segment_of_a_windows_style_path() {
+    fn local_path_nests_user_and_remote_folder() {
         assert_eq!(
-            local_path("/music", "@@abc\\Albums\\01 - Track.mp3"),
-            PathBuf::from("/music/01 - Track.mp3")
+            local_path("/music", "amy", "@@abc\\Albums\\01 - Track.mp3"),
+            PathBuf::from("/music/amy/Albums/01 - Track.mp3")
         );
         assert_eq!(
-            local_path("/music", "plain.mp3"),
-            PathBuf::from("/music/plain.mp3")
+            local_path("/music", "amy", "plain.mp3"),
+            PathBuf::from("/music/amy/plain.mp3")
         );
         assert_eq!(
-            local_path("/music", "unix/style/file.mp3"),
-            PathBuf::from("/music/file.mp3")
+            local_path("/music", "amy", "unix/style/file.mp3"),
+            PathBuf::from("/music/amy/style/file.mp3")
         );
     }
 
@@ -1020,20 +1031,19 @@ mod tests {
     }
 
     #[test]
-    fn requests_that_would_overwrite_the_same_local_file_are_dropped() {
-        // Different remote paths, same basename: both would be written to
-        // /music/track.mp3 and the slower transfer would clobber the other.
+    fn same_basename_from_different_folders_no_longer_collides() {
+        // Each lands under /music/<user>/<folder>/track.mp3, so both are kept.
         let out = Out::new(false, true);
         let kept = dedupe(
             vec![
                 request("a", "@@one\\album\\track.mp3"),
                 request("b", "@@two\\other\\track.mp3"),
+                request("a", "@@one\\other\\track.mp3"),
             ],
             "/music",
             &out,
         );
-        assert_eq!(kept.len(), 1);
-        assert_eq!(kept[0].user, "a");
+        assert_eq!(kept.len(), 3);
     }
 
     #[test]
